@@ -1,14 +1,23 @@
+"""Step 4 - the attendance system: teacher login, then a timed monitoring session.
+
+Run this file. The first launch asks you to create the teacher account; after
+that, log in, choose the session length and monitoring starts (ESC stops early).
+The report is saved to data/attendance_report.json.
+"""
+import hashlib
+import hmac
 import os
+import sqlite3
 import tkinter as tk
 from tkinter import messagebox
 
 import pyttsx3
 
-from auth import TeacherStore
-from monitor import ATTENDANCE_REPORT_FILE, DATA_DIR, run_monitoring
+from face_recognizer import DATA_DIR, run_monitoring
 
 
 TEACHER_DB = os.path.join(DATA_DIR, "teacher.db")
+HASH_PREFIX = "pbkdf2"
 
 
 # -------------------------
@@ -32,11 +41,74 @@ def speak(text):
 
 
 # -------------------------
-# GUI
+# Teacher accounts (salted PBKDF2 password hashes)
 # -------------------------
-store = TeacherStore(TEACHER_DB)
+def hash_password(password, salt=None, iterations=200_000):
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return f"{HASH_PREFIX}${iterations}${salt.hex()}${digest.hex()}"
 
 
+def verify_password(password, stored):
+    try:
+        prefix, iterations, salt_hex, digest_hex = stored.split("$")
+        if prefix != HASH_PREFIX:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except ValueError:
+        return False
+
+
+class TeacherStore:
+    """SQLite store for the teacher account. Old plain-text accounts still work
+    and are upgraded to a hash on their first login."""
+
+    def __init__(self, db_path):
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.conn = sqlite3.connect(db_path)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS teacher(email TEXT, password TEXT)")
+        self.conn.commit()
+
+    def has_teacher(self):
+        return self.conn.execute("SELECT 1 FROM teacher LIMIT 1").fetchone() is not None
+
+    def create(self, email, password):
+        email = email.strip().lower()
+        if "@" not in email:
+            raise ValueError("Enter a valid email address")
+        if len(password) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        if self.conn.execute("SELECT 1 FROM teacher WHERE email=?", (email,)).fetchone():
+            raise ValueError("An account with this email already exists")
+        self.conn.execute("INSERT INTO teacher VALUES(?,?)", (email, hash_password(password)))
+        self.conn.commit()
+
+    def verify(self, email, password):
+        email = email.strip().lower()
+        row = self.conn.execute("SELECT password FROM teacher WHERE email=?", (email,)).fetchone()
+        if row is None:
+            return False
+
+        stored = row[0]
+        if stored.startswith(HASH_PREFIX + "$"):
+            return verify_password(password, stored)
+
+        if hmac.compare_digest(stored, password):  # legacy plain-text account
+            self.conn.execute("UPDATE teacher SET password=? WHERE email=?",
+                              (hash_password(password), email))
+            self.conn.commit()
+            return True
+        return False
+
+
+store = None  # created in __main__ (tests replace it)
+
+
+# -------------------------
+# Windows
+# -------------------------
 def create_account_window():
     root = tk.Tk()
     root.title("Create Teacher Account")
@@ -126,6 +198,8 @@ def login_window():
 
 
 if __name__ == "__main__":
+    store = TeacherStore(TEACHER_DB)
+
     if store.has_teacher():
         login_window()
     else:

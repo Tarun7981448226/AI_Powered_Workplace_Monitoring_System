@@ -1,10 +1,10 @@
-# Tested with Python 3.13 (python.org build, which includes Tkinter) on macOS.
+# Tested with Python 3.13 (python.org build, includes Tkinter) on macOS.
 opencv-contrib-python>=4.8,<6
 numpy>=1.24
 Pillow>=10.0
 torch>=2.2
 torchvision>=0.17
+scikit-learn>=1.3   # only for the public background faces in face_train.py
 pyttsx3>=2.90
 pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 mediapipe>=0.10
-scikit-learn>=1.3   # only for tests and src/add_background_faces.py

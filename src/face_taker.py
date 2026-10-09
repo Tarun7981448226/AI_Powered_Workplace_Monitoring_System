@@ -1,5 +1,5 @@
 import cv2
-from detector import FaceDetector
+from face_recognizer import FaceDetector
 import os
 import json
 import time
