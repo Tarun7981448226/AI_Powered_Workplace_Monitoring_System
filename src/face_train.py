@@ -44,8 +44,8 @@ def train_faces(dataset_path):
 
         person_path = os.path.join(dataset_path, person_name)
 
-        if not os.path.isdir(person_path):
-            continue
+        if not os.path.isdir(person_path) or person_name.startswith("_background"):
+            continue  # background faces are only used by the CNN
 
         print(f"[INFO] Processing person: {person_name}")
 

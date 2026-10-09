@@ -1,4 +1,5 @@
 import cv2
+from detector import FaceDetector
 import os
 import json
 import time
@@ -60,9 +61,8 @@ def save_user_info(user_id,name,hand_movement,json_file):
 # -----------------------------
 def capture_faces(directory):
 
-    face_cascade=cv2.CascadeClassifier(
-        cv2.data.haarcascades+"haarcascade_frontalface_default.xml"
-    )
+    detector=FaceDetector(min_size=120)
+    print("[INFO] Face detector:",detector.name)
 
     cam=cv2.VideoCapture(0)
 
@@ -102,12 +102,7 @@ def capture_faces(directory):
 
             gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
 
-            faces=face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.2,
-                minNeighbors=6,
-                minSize=(120,120)
-            )
+            faces=detector.detect(frame)
 
             for (x,y,w,h) in faces:
 
