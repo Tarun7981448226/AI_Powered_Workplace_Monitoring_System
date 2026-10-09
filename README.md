@@ -42,7 +42,7 @@ camera frame -> YuNet face detector (neural net, Haar fallback)
 
 - **CNN:** 4 convolution blocks (BatchNorm + ReLU), 128-d embedding, trained
   with augmentation (rotation, shift, brightness, flip), AdamW + OneCycle, saved
-  to `models/face_cnn.pt`. A match needs softmax probability >= 0.7.
+  to `models/face_cnn.pt`. A match needs a confidence of at least 70%.
 - **LBPH fallback:** used when no CNN is trained. A match needs distance < 70.
 - **Only one person enrolled?** A CNN needs at least two classes, so
   `face_train.py` adds a few public background faces (Olivetti set, stored as
@@ -57,8 +57,8 @@ camera frame -> YuNet face detector (neural net, Haar fallback)
 
 ## Reading the on-screen text
 
-Each face shows `Name (number)`. For the CNN the number is the probability
-(higher is better, must be >= 0.7). For LBPH it is `d=` distance (lower is
+Each face shows `Name (number)`. For the CNN the number is the confidence in
+percent (higher is better, must be at least 70%). For LBPH it is `d=` distance (lower is
 better, must be < 70). If you see "Unknown" for yourself, re-enroll in your
 current lighting (`face_taker.py`) and train again (`face_train.py`).
 

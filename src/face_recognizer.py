@@ -32,7 +32,7 @@ ATTENDANCE_REPORT_FILE = os.path.join(DATA_DIR, "attendance_report.json")
 YUNET_FILE = os.path.join(ASSETS_DIR, "face_detection_yunet_2023mar.onnx")
 HAAR_FILE = os.path.join(ASSETS_DIR, "haarcascade_frontalface_default.xml")
 
-CNN_THRESHOLD = 0.7        # minimum softmax probability to accept a CNN match
+CNN_THRESHOLD = 0.7        # minimum confidence (70%) to accept a CNN match
 LBPH_THRESHOLD = 70        # maximum LBPH distance to accept a match
 PRESENT_FRACTION = 0.8     # present if seen for >= 80% of the session
 BACKGROUND_PREFIX = "_background"
@@ -152,7 +152,7 @@ class Recognizer:
         name = self.label_map.get(idx.item(), "Unknown")
         if prob.item() < CNN_THRESHOLD or name.startswith(BACKGROUND_PREFIX):
             name = "Unknown"
-        return name, f"{prob.item():.2f}"
+        return name, f"{prob.item() * 100:.0f}%"
 
 
 # =========================================================

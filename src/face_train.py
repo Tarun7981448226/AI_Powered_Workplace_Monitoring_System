@@ -290,14 +290,14 @@ def train_cnn(dataset_path, epochs=40, batch_size=32, lr=2e-3):
         val_acc = accuracy(model, val_loader, device)
         if epoch == 1 or epoch % 5 == 0:
             print(f"   epoch {epoch:2d}/{epochs}  "
-                  f"loss={total_loss / len(train_loader.dataset):.3f}  val_acc={val_acc:.2f}")
+                  f"loss={total_loss / len(train_loader.dataset):.3f}  val_acc={val_acc:.0%}")
 
     os.makedirs(MODELS_DIR, exist_ok=True)
     torch.save({"state_dict": model.cpu().state_dict(), "num_classes": len(label_map)}, CNN_FILE)
     with open(CNN_LABEL_FILE, "w") as f:
         json.dump(label_map, f)
 
-    print(f"[INFO] CNN saved: {CNN_FILE}  (validation accuracy {val_acc:.2f})")
+    print(f"[INFO] CNN saved: {CNN_FILE}  (validation accuracy {val_acc:.0%})")
     return label_map
 
 
