@@ -1,5 +1,6 @@
 # Sensitive / personal data and generated artifacts
-dataset/
+dataset/*
+!dataset/signs/
 data/
 models/
 

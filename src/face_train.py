@@ -1,8 +1,14 @@
 """Step 2 - train the face recognition models from dataset/faces.
 
-Trains two models from the photos captured by face_taker.py:
+Trains from the data captured by face_taker.py:
   * OpenCV LBPH      -> models/trainer_face.yml + models/label_map.json
-  * PyTorch CNN      -> models/face_cnn.pt      + models/label_map_cnn.json
+  * PyTorch CNN      -> models/face_cnn.pt      + models/label_map_cnn.json   (faces)
+  * PyTorch MLP      -> models/sign_net.pt                                    (hand signs)
+
+Hand signs are learned from the public HaGRID gesture dataset (CC BY-SA 4.0,
+https://github.com/hukenovs/hagrid): on first run it is downloaded (about 1 GB,
+one time), MediaPipe extracts hand landmarks from ~12,000 images, and the
+compact result is stored in dataset/signs/ - the images are not kept.
 
 face_recognizer.py / main.py use the CNN when it exists, otherwise LBPH.
 A CNN needs at least two people to learn from, so when only one person is
@@ -16,6 +22,8 @@ import random
 import cv2
 import numpy as np
 from PIL import Image
+
+from face_recognizer import HAND_FILE, NO_SIGN_LABEL, SIGN_FEATURES, HandTracker
 
 try:
     import torch
@@ -37,6 +45,10 @@ TRAINER_FILE = os.path.join(MODELS_DIR, "trainer_face.yml")
 LABEL_MAP_FILE = os.path.join(MODELS_DIR, "label_map.json")
 CNN_FILE = os.path.join(MODELS_DIR, "face_cnn.pt")
 CNN_LABEL_FILE = os.path.join(MODELS_DIR, "label_map_cnn.json")
+SIGN_DATA_FILE = os.path.join(BASE_DIR, "dataset", "signs", "hagrid_landmarks.npz")
+SIGN_FILE = os.path.join(MODELS_DIR, "sign_net.pt")
+SIGN_ZIP_URL = ("https://huggingface.co/datasets/cj-mills/hagrid-sample-30k-384p/"
+                "resolve/main/hagrid-sample-30k-384p.zip")
 
 BACKGROUND_PREFIX = "_background"
 IMG_SIZE = 96  # CNN input size
@@ -144,6 +156,23 @@ if torch is not None:
 
         def forward(self, x):
             return self.classifier(self.embedding(self.features(x)))
+
+
+    class SignNet(nn.Module):
+        """MLP that classifies a hand pose from its 63 landmark coordinates."""
+
+        def __init__(self, num_classes):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(SIGN_FEATURES, 256), nn.BatchNorm1d(256), nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(256, 128), nn.BatchNorm1d(128), nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(128, num_classes),
+            )
+
+        def forward(self, x):
+            return self.net(x)
 
 
     class FaceDataset(Dataset):
@@ -302,17 +331,194 @@ def train_cnn(dataset_path, epochs=40, batch_size=32, lr=2e-3):
 
 
 # =========================================================
+# Hand signs (public HaGRID dataset -> MediaPipe landmarks -> PyTorch MLP)
+# =========================================================
+def build_sign_dataset(zip_path=None, per_class=600, no_sign_count=1500, seed=0):
+    """Extracts hand landmarks from the HaGRID sample and saves them as one small file."""
+    import shutil
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    tmp = None
+    if zip_path is None:
+        tmp = tempfile.mkdtemp()
+        zip_path = os.path.join(tmp, "hagrid.zip")
+        print("[INFO] Downloading the HaGRID gesture dataset (about 1 GB, one time)...")
+
+        def progress(blocks, size, total):
+            if total > 0 and blocks % 2000 == 0:
+                print(f"   {min(blocks * size / total, 1):.0%}")
+
+        urllib.request.urlretrieve(SIGN_ZIP_URL, zip_path, reporthook=progress)
+
+    root = "hagrid-sample-30k-384p"
+    rng = random.Random(seed)
+    tracker = HandTracker(static=True)
+    features, labels, classes = [], [], []
+
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = set(z.namelist())
+            samples, no_sign = {}, []
+
+            for name in sorted(names):
+                if not (name.startswith(f"{root}/ann_train_val/") and name.endswith(".json")):
+                    continue
+                gesture = os.path.basename(name)[:-5]
+                folder = f"{root}/hagrid_30k/train_val_{gesture}"
+                annotations = json.loads(z.read(name))
+                samples[gesture] = []
+
+                for image_id, a in annotations.items():
+                    path = f"{folder}/{image_id}.jpg"
+                    if path not in names:
+                        continue
+                    for box, label in zip(a["bboxes"], a["labels"]):
+                        if label == gesture:
+                            samples[gesture].append((path, box))
+                        elif label == NO_SIGN_LABEL:
+                            no_sign.append((path, box))
+
+            samples[NO_SIGN_LABEL] = no_sign
+            classes = sorted(samples)
+            print(f"[INFO] Extracting hand landmarks for {len(classes)} classes...")
+
+            for idx, cls in enumerate(classes):
+                items = samples[cls]
+                rng.shuffle(items)
+                limit = no_sign_count if cls == NO_SIGN_LABEL else per_class
+                kept = 0
+
+                for path, (bx, by, bw, bh) in items:
+                    if kept >= limit:
+                        break
+                    img = cv2.imdecode(np.frombuffer(z.read(path), np.uint8), cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+
+                    h, w = img.shape[:2]
+                    m = 0.3 * max(bw, bh)  # context around the hand
+                    x0, y0 = int(max(bx - m, 0) * w), int(max(by - m, 0) * h)
+                    x1, y1 = int(min(bx + bw + m, 1) * w), int(min(by + bh + m, 1) * h)
+                    if x1 - x0 < 20 or y1 - y0 < 20:
+                        continue
+
+                    feats, _ = tracker.process(img[y0:y1, x0:x1])
+                    if feats is not None:
+                        features.append(feats)
+                        labels.append(idx)
+                        kept += 1
+
+                print(f"   {cls:16s} {kept} samples")
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    os.makedirs(os.path.dirname(SIGN_DATA_FILE), exist_ok=True)
+    np.savez_compressed(SIGN_DATA_FILE, features=np.array(features, np.float32),
+                        labels=np.array(labels), classes=np.array(classes))
+    print(f"[INFO] Saved {len(features)} landmark samples: {SIGN_DATA_FILE}")
+
+
+def augment_poses(x):
+    """Random rotation, scale, mirror and jitter on a batch of poses (B, 63)."""
+    batch = x.shape[0]
+    pts = x.clone().view(batch, 21, 3)
+
+    angle = (torch.rand(batch) * 2 - 1) * 0.26             # about +-15 degrees
+    cos, sin = torch.cos(angle), torch.sin(angle)
+    px, py = pts[:, :, 0].clone(), pts[:, :, 1].clone()
+    pts[:, :, 0] = cos[:, None] * px - sin[:, None] * py
+    pts[:, :, 1] = sin[:, None] * px + cos[:, None] * py
+
+    flip = torch.rand(batch) < 0.5                         # left <-> right hand
+    pts[flip, :, 0] *= -1
+
+    pts *= 1 + 0.1 * (torch.rand(batch, 1, 1) * 2 - 1)
+    pts += 0.01 * torch.randn_like(pts)
+    return pts.view(batch, -1)
+
+
+def train_signs(epochs=60, batch_size=128, lr=2e-3):
+    if torch is None:
+        print("[WARNING] PyTorch is not installed - skipping sign training.")
+        return None
+
+    if not os.path.exists(HAND_FILE):
+        print("[WARNING] assets/hand_landmarker.task is missing - skipping signs.")
+        return None
+
+    if not os.path.exists(SIGN_DATA_FILE):
+        try:
+            build_sign_dataset()
+        except Exception as error:  # e.g. offline
+            print(f"[WARNING] Could not build the sign dataset ({error}) - skipping signs.")
+            return None
+
+    data = np.load(SIGN_DATA_FILE)
+    x, y, classes = data["features"], data["labels"], [str(c) for c in data["classes"]]
+
+    torch.manual_seed(0)
+    train_idx, val_idx = split_per_class(y, val_fraction=0.2)
+    xt, yt = torch.from_numpy(x[train_idx]), torch.from_numpy(y[train_idx])
+    xv, yv = torch.from_numpy(x[val_idx]), torch.from_numpy(y[val_idx])
+
+    print(f"\n[INFO] Training sign model: {len(xt)} train / {len(xv)} validation samples, "
+          f"{len(classes)} classes")
+
+    net = SignNet(len(classes))
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=(len(xt) + batch_size - 1) // batch_size)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+
+    for epoch in range(1, epochs + 1):
+        net.train()
+        order = torch.randperm(len(xt))
+        for i in range(0, len(order), batch_size):
+            batch = order[i:i + batch_size]
+            if len(batch) < 2:
+                continue
+            optimizer.zero_grad()
+            criterion(net(augment_poses(xt[batch])), yt[batch]).backward()
+            optimizer.step()
+            scheduler.step()
+
+        if epoch == 1 or epoch % 10 == 0:
+            net.eval()
+            with torch.no_grad():
+                acc = (net(xv).argmax(1) == yv).float().mean().item()
+            print(f"   epoch {epoch:2d}/{epochs}  val_acc={acc:.1%}")
+
+    net.eval()
+    with torch.no_grad():
+        pred = net(xv).argmax(1)
+    print("[INFO] Accuracy per sign (held-out validation):")
+    for i, name in enumerate(classes):
+        mask = yv == i
+        if mask.any():
+            print(f"   {name:16s} {(pred[mask] == i).float().mean().item():6.1%}  ({int(mask.sum())} samples)")
+    print(f"[INFO] Overall: {(pred == yv).float().mean().item():.1%}")
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    torch.save({"state_dict": net.state_dict(), "classes": classes}, SIGN_FILE)
+    print(f"[INFO] Sign model saved: {SIGN_FILE}")
+    return classes
+
+
+# =========================================================
 # MAIN
 # =========================================================
 if __name__ == "__main__":
 
-    if not os.path.exists(DATASET_DIR):
-        print("[ERROR] Dataset folder not found. Run face_taker.py first.")
-        raise SystemExit(1)
+    if os.path.exists(DATASET_DIR):
+        people = train_lbph(DATASET_DIR)
+        if people:
+            train_cnn(DATASET_DIR)
+    else:
+        print("[INFO] No face data yet - run face_taker.py to enroll people.")
 
-    people = train_lbph(DATASET_DIR)
-
-    if people:
-        train_cnn(DATASET_DIR)
+    train_signs()
 
     print("\n[INFO] Training finished.")

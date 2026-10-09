@@ -1,258 +1,128 @@
-import cv2
-from face_recognizer import FaceDetector
+"""Step 1 - enroll a person: captures 30 face photos (look straight, then left, then right).
+
+Hand signs do not need to be recorded: face_train.py learns them from a large
+public gesture dataset (HaGRID). Run face_train.py after enrolling.
+"""
 import os
-import json
 import time
+
+import cv2
 import pyttsx3
-import mediapipe as mp
+
+from face_recognizer import FaceDetector
 
 
 # -----------------------------
 # Paths
 # -----------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+FACES_DIR = os.path.join(BASE_DIR, "dataset", "faces")
 
 
 # -----------------------------
-# Text to Speech Setup
+# Text to speech
 # -----------------------------
-engine = pyttsx3.init()
-engine.setProperty('rate',150)
+try:
+    engine = pyttsx3.init()
+    engine.setProperty("rate", 150)
+except Exception:  # no speech engine available
+    engine = None
+
 
 def speak(text):
-    engine.say(text)
-    engine.runAndWait()
+    if engine is None:
+        return
+    try:
+        engine.say(text)
+        engine.runAndWait()
+    except Exception:
+        pass
 
 
-# -----------------------------
-# Create folders
-# -----------------------------
-def create_directory(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+def open_camera(width=1280, height=720):
+    cam = cv2.VideoCapture(0)
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    time.sleep(2)  # camera warm-up
+    return cam
 
 
-# -----------------------------
-# Save user info
-# -----------------------------
-def save_user_info(user_id,name,hand_movement,json_file):
-
-    data={}
-
-    if os.path.exists(json_file):
-        try:
-            with open(json_file,"r") as f:
-                data=json.load(f)
-        except:
-            data={}
-
-    data[str(user_id)] = {
-        "name":name,
-        "hand_movement":hand_movement
-    }
-
-    with open(json_file,"w") as f:
-        json.dump(data,f,indent=4)
-
-
-# -----------------------------
-# FACE CAPTURE
-# -----------------------------
+# =========================================================
+# 1) Faces
+# =========================================================
 def capture_faces(directory):
+    os.makedirs(directory, exist_ok=True)
 
-    detector=FaceDetector(min_size=120)
-    print("[INFO] Face detector:",detector.name)
+    detector = FaceDetector(min_size=120)
+    print("[INFO] Face detector:", detector.name)
 
-    cam=cv2.VideoCapture(0)
+    cam = open_camera()
 
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH,1280)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT,720)
-
-    # warmup camera
-    time.sleep(2)
-
-    phases=[
-        ("Look straight",20),
-        ("Turn head left slowly",5),
-        ("Turn head right slowly",5)
+    phases = [
+        ("Look straight", 20),
+        ("Turn head left slowly", 5),
+        ("Turn head right slowly", 5),
     ]
 
-    total_count=0
-
+    total = 0
     print("\n[INFO] Guided capture starting...")
 
-    for instruction,limit in phases:
+    for instruction, limit in phases:
 
         speak(instruction)
+        print("[INFO]", instruction)
+        time.sleep(3)  # time to move head
 
-        print("[INFO]",instruction)
-
-        # time to move head
-        time.sleep(3)
-
-        count=0
+        count = 0
 
         while count < limit:
 
-            ret,frame=cam.read()
-
-            if not ret:
+            ok, frame = cam.read()
+            if not ok:
                 break
 
-            gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            faces=detector.detect(frame)
+            for (x, y, w, h) in detector.detect(frame)[:1]:
 
-            for (x,y,w,h) in faces:
+                face = cv2.equalizeHist(cv2.resize(gray[y:y + h, x:x + w], (220, 220)))
 
-                face=gray[y:y+h,x:x+w]
+                total += 1
+                count += 1
+                cv2.imwrite(os.path.join(directory, f"{total}.jpg"), face)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                # normalize face
-                face=cv2.resize(face,(220,220))
-                face=cv2.equalizeHist(face)
+            cv2.putText(frame, f"{instruction} ({count}/{limit})", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            cv2.imshow("Face Capture", frame)
 
-                total_count+=1
-                count+=1
-
-                file_path=os.path.join(directory,f"{total_count}.jpg")
-
-                cv2.imwrite(file_path,face)
-
-                cv2.rectangle(frame,(x,y),(x+w,y+h),(0,255,0),2)
-
-                break
-
-            cv2.putText(
-                frame,
-                f"{instruction} ({count}/{limit})",
-                (20,40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0,255,255),
-                2
-            )
-
-            cv2.imshow("Face Capture",frame)
-
-            # slower capture to avoid duplicates
-            if cv2.waitKey(400)==27:
+            if cv2.waitKey(400) == 27:  # slow capture avoids duplicate photos
                 break
 
     cam.release()
     cv2.destroyAllWindows()
 
     speak("Face capture complete")
-
-    print("[INFO] Captured",total_count,"images.")
-
-
-# -----------------------------
-# HAND CAPTURE
-# -----------------------------
-def capture_hand_movements(directory):
-
-    mp_hands=mp.solutions.hands
-
-    hands=mp_hands.Hands(min_detection_confidence=0.6)
-
-    mp_draw=mp.solutions.drawing_utils
-
-    cam=cv2.VideoCapture(0)
-
-    print("\n[INFO] Capturing hand gestures...")
-
-    count=0
-
-    while count < 30:
-
-        ret,frame=cam.read()
-
-        if not ret:
-            break
-
-        img_rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-
-        results=hands.process(img_rgb)
-
-        if results.multi_hand_landmarks:
-
-            for hand_landmarks in results.multi_hand_landmarks:
-
-                mp_draw.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS
-                )
-
-                count+=1
-
-                file_path=os.path.join(directory,f"{count}.jpg")
-
-                cv2.imwrite(file_path,frame)
-
-        cv2.imshow("Hand Capture",frame)
-
-        if cv2.waitKey(1)==27:
-            break
-
-    cam.release()
-    cv2.destroyAllWindows()
-
-    print("[INFO] Hand gesture capture complete.")
+    print("[INFO] Captured", total, "images.")
 
 
-# -----------------------------
-# MAIN PROGRAM
-# -----------------------------
-if __name__=="__main__":
-
-    dataset_dir = os.path.join(BASE_DIR, "dataset")
-    face_main_dir = os.path.join(dataset_dir, "faces")
-    hand_main_dir = os.path.join(dataset_dir, "hands")
-
-    user_info_file = os.path.join(DATA_DIR, "names.json")
-
-    create_directory(DATA_DIR)
-    create_directory(dataset_dir)
-    create_directory(face_main_dir)
-    create_directory(hand_main_dir)
-
-    user_id=0
+# =========================================================
+# MAIN
+# =========================================================
+if __name__ == "__main__":
 
     while True:
-
         print("\n========== NEW USER ==========")
-
-        name=input("Enter user name: ").strip()
+        name = input("Enter user name: ").strip()
 
         if not name:
             print("Name cannot be empty")
             continue
 
-        hand_move=input("Enter hand gesture name: ").strip()
+        capture_faces(os.path.join(FACES_DIR, name))
+        print("\n[INFO] Face data saved!")
 
-        if not hand_move:
-            print("Hand gesture cannot be empty")
-            continue
-
-        face_dir=os.path.join(face_main_dir,name)
-        hand_dir=os.path.join(hand_main_dir,name)
-
-        create_directory(face_dir)
-        create_directory(hand_dir)
-
-        save_user_info(user_id,name,hand_move,user_info_file)
-
-        capture_faces(face_dir)
-        capture_hand_movements(hand_dir)
-
-        print("\n[INFO] Data saved successfully!")
-
-        user_id+=1
-
-        again=input("\nAdd another user? (y/n): ").lower()
-
-        if again!="y":
-            print("\n[INFO] Data collection finished.")
+        if input("\nAdd another user? (y/n): ").lower() != "y":
             break
+
+    print("\n[INFO] Done. Next: run face_train.py")
