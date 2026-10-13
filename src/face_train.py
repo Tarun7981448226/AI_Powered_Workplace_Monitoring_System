@@ -45,6 +45,7 @@ TRAINER_FILE = os.path.join(MODELS_DIR, "trainer_face.yml")
 LABEL_MAP_FILE = os.path.join(MODELS_DIR, "label_map.json")
 CNN_FILE = os.path.join(MODELS_DIR, "face_cnn.pt")
 CNN_LABEL_FILE = os.path.join(MODELS_DIR, "label_map_cnn.json")
+ROBUSTNESS_FILE = os.path.join(BASE_DIR, "data", "robustness_report.json")
 SIGN_DATA_FILE = os.path.join(BASE_DIR, "dataset", "signs", "hagrid_landmarks.npz")
 SIGN_FILE = os.path.join(MODELS_DIR, "sign_net.pt")
 SIGN_ZIP_URL = ("https://huggingface.co/datasets/cj-mills/hagrid-sample-30k-384p/"
@@ -193,7 +194,7 @@ if torch is not None:
         def __getitem__(self, i):
             img = self.images[i]
             if self.augment is not None:
-                img = np.array(self.augment(img))
+                img = degrade(np.array(self.augment(img)))
             return (self.to_tensor(img) - 0.5) / 0.5, int(self.labels[i])
 
 
@@ -270,6 +271,69 @@ def accuracy(model, loader, device):
     return correct / max(total, 1)
 
 
+def add_noise(img, sigma, rng):
+    noisy = img.astype(np.float32) + rng.normal(0, sigma, img.shape)
+    return np.clip(noisy, 0, 255).astype(np.uint8)
+
+
+def add_face_mask(img):
+    """Covers the nose and mouth with a flat patch, like a surgical mask."""
+    out = img.copy()
+    h, w = out.shape
+    cv2.rectangle(out, (int(w * 0.15), int(h * 0.55)), (int(w * 0.85), int(h * 0.95)), 190, -1)
+    return out
+
+
+def degrade(img):
+    """Training-time noise, blur and face-mask patches, so the CNN copes with
+    poor webcams and masks."""
+    if random.random() < 0.3:
+        img = add_noise(img, random.uniform(5, 40), np.random.default_rng(random.getrandbits(32)))
+    if random.random() < 0.3:
+        k = random.choice([3, 5, 9])
+        img = cv2.GaussianBlur(img, (k, k), 0)
+    if random.random() < 0.25:
+        img = add_face_mask(img)
+    return img
+
+
+ROBUSTNESS_TESTS = [
+    ("clean", lambda img, rng: img),
+    ("noise sigma=15", lambda img, rng: add_noise(img, 15, rng)),
+    ("noise sigma=30", lambda img, rng: add_noise(img, 30, rng)),
+    ("noise sigma=50", lambda img, rng: add_noise(img, 50, rng)),
+    ("blur 5x5", lambda img, rng: cv2.GaussianBlur(img, (5, 5), 0)),
+    ("blur 9x9", lambda img, rng: cv2.GaussianBlur(img, (9, 9), 0)),
+    ("blur 15x15", lambda img, rng: cv2.GaussianBlur(img, (15, 15), 0)),
+    ("face mask", lambda img, rng: add_face_mask(img)),
+]
+
+
+def evaluate_robustness(model, images, labels, device):
+    """Accuracy on held-out faces under noise, blur and a face-mask patch."""
+    rng = np.random.default_rng(0)
+    results = {}
+    model.eval()
+
+    print("\n[INFO] Robustness on held-out faces (accuracy | lowest per-person accuracy):")
+    for name, corrupt in ROBUSTNESS_TESTS:
+        corrupted = np.array([corrupt(img, rng) for img in images])
+        loader = DataLoader(FaceDataset(corrupted, labels), batch_size=64)
+        preds = []
+        with torch.no_grad():
+            for x, _ in loader:
+                preds.append(model(x.to(device)).argmax(1).cpu())
+        hits = torch.cat(preds).numpy() == labels
+        worst = min(hits[labels == c].mean() for c in np.unique(labels))
+        results[name] = {"accuracy": float(hits.mean()), "worst_person": float(worst)}
+        print(f"   {name:16s} {hits.mean():6.1%}  |  {worst:6.1%}")
+
+    os.makedirs(os.path.dirname(ROBUSTNESS_FILE), exist_ok=True)
+    with open(ROBUSTNESS_FILE, "w") as f:
+        json.dump({"held_out_faces": int(len(labels)), "results": results}, f, indent=2)
+    print(f"[INFO] Robustness report saved: {ROBUSTNESS_FILE}  ({len(labels)} held-out faces)")
+
+
 def train_cnn(dataset_path, epochs=40, batch_size=32, lr=2e-3):
     if torch is None:
         print("[WARNING] PyTorch is not installed - skipping the CNN.")
@@ -287,6 +351,7 @@ def train_cnn(dataset_path, epochs=40, batch_size=32, lr=2e-3):
         images, labels, label_map = load_cnn_dataset(dataset_path)
 
     torch.manual_seed(0)
+    random.seed(0)
     device = get_device()
     print(f"\n[INFO] Training CNN on {len(images)} images, "
           f"{len(label_map)} identities, device={device}")
@@ -320,6 +385,8 @@ def train_cnn(dataset_path, epochs=40, batch_size=32, lr=2e-3):
         if epoch == 1 or epoch % 5 == 0:
             print(f"   epoch {epoch:2d}/{epochs}  "
                   f"loss={total_loss / len(train_loader.dataset):.3f}  val_acc={val_acc:.0%}")
+
+    evaluate_robustness(model, images[val_idx], labels[val_idx], device)
 
     os.makedirs(MODELS_DIR, exist_ok=True)
     torch.save({"state_dict": model.cpu().state_dict(), "num_classes": len(label_map)}, CNN_FILE)

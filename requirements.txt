@@ -8,3 +8,4 @@ scikit-learn>=1.3   # only for the public background faces in face_train.py
 pyttsx3>=2.90
 pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 mediapipe>=0.10
+pyarrow>=14         # only for face_fairness.py / face_benchmark.py (FairFace)

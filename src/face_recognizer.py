@@ -44,6 +44,7 @@ HAAR_FILE = os.path.join(ASSETS_DIR, "haarcascade_frontalface_default.xml")
 CNN_THRESHOLD = 0.7        # minimum confidence (70%) to accept a CNN match
 LBPH_THRESHOLD = 70        # maximum LBPH distance to accept a match
 PRESENT_FRACTION = 0.8     # present if seen for >= 80% of the session
+DETECT_WIDTH = 640         # faces are detected on a copy at most this wide
 BACKGROUND_PREFIX = "_background"
 
 SIGN_FEATURES = 63         # 21 hand landmarks x (x, y, z), relative to the wrist
@@ -83,8 +84,9 @@ class FaceDetector:
     detect(frame) -> list of (x, y, w, h) boxes inside the frame, largest first.
     """
 
-    def __init__(self, min_size=80, score_threshold=0.6):
+    def __init__(self, min_size=80, score_threshold=0.6, detect_width=DETECT_WIDTH):
         self.min_size = min_size
+        self.detect_width = detect_width  # None = detect at full resolution
         self.yunet = None
 
         if os.path.exists(YUNET_FILE) and hasattr(cv2, "FaceDetectorYN"):
@@ -100,17 +102,28 @@ class FaceDetector:
     def detect(self, frame):
         height, width = frame.shape[:2]
 
-        if self.yunet is not None:
-            bgr = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            self.yunet.setInputSize((width, height))
-            _, found = self.yunet.detect(bgr)
-            boxes = [] if found is None else [tuple(int(v) for v in f[:4]) for f in found]
+        # Detect on a downscaled copy (much less work on HD webcams), then map
+        # the boxes back to full resolution for recognition.
+        scale = 1.0
+        if self.detect_width and width > self.detect_width:
+            scale = self.detect_width / width
+            small = cv2.resize(frame, (self.detect_width, round(height * scale)),
+                               interpolation=cv2.INTER_AREA)
         else:
-            gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            small = frame
+        small_h, small_w = small.shape[:2]
+
+        if self.yunet is not None:
+            bgr = small if small.ndim == 3 else cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+            self.yunet.setInputSize((small_w, small_h))
+            _, found = self.yunet.detect(bgr)
+            found = [] if found is None else [f[:4] for f in found]
+        else:
+            gray = small if small.ndim == 2 else cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            min_side = max(int(self.min_size * scale), 20)
             found = self.haar.detectMultiScale(
-                gray, scaleFactor=1.2, minNeighbors=5,
-                minSize=(self.min_size, self.min_size))
-            boxes = [tuple(int(v) for v in b) for b in found]
+                gray, scaleFactor=1.2, minNeighbors=5, minSize=(min_side, min_side))
+        boxes = [tuple(int(round(v / scale)) for v in b) for b in found]
 
         clipped = []
         for x, y, w, h in boxes:
